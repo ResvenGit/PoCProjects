@@ -1,0 +1,4 @@
+"""
+VideoEditing scripts package.
+"""
+
