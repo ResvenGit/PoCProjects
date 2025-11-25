@@ -111,6 +111,7 @@ class MainWindow(QMainWindow):
         self.media_duration: Optional[float] = None
         self.original_path: Optional[str] = None
         self.topic_results: List[str] = []
+        self.topic_details: List[dict] = []
         self._topic_list_updating = False
         self._last_url_file = LAST_URL_FILE
         self._initial_url = self._load_saved_url() or DEFAULT_URL
@@ -142,9 +143,10 @@ class MainWindow(QMainWindow):
         for b in (self.btn_copy_topic, self.btn_copy_vtt, self.btn_copy_thumb):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setMinimumHeight(36)
-        self.btn_apply_topic_results = QPushButton("분석 결과 반영")
-        self.btn_remove_topic = QPushButton("선택 토픽 제거")
+        self.btn_apply_topic_results = QPushButton("분석 프롬프트 결과 반영")
         self.btn_add_topic = QPushButton("토픽 추가")
+        self.btn_remove_topic = QPushButton("선택 토픽 제거")
+        self.btn_apply_vtt_topics = QPushButton("VTT 분석 프롬프트 결과 반영")
         self.lbl_topics = QLabel("토픽 목록 (0)")
         self.list_topics = QListWidget()
         self.list_topics.setAlternatingRowColors(True)
@@ -166,6 +168,9 @@ class MainWindow(QMainWindow):
         self.list_segments = QListWidget()
         self.btn_prev = QPushButton("이전")
         self.btn_next = QPushButton("다음")
+        for b in (self.btn_prev, self.btn_next):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.setMinimumHeight(28)
 
         # 폭을 넓혀 자연스럽게
         self.btn_apply_clipboard = QPushButton("클립보드에서 세그먼트 적용")
@@ -173,6 +178,10 @@ class MainWindow(QMainWindow):
         for b in (self.btn_apply_clipboard, self.btn_copy_segments):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setMinimumHeight(28)
+
+        self.lbl_topic_summary = QLabel("관련 설명")
+        self.topic_summary_view = QTextEdit()
+        self.topic_summary_view.setReadOnly(True)
 
         self.start_edit = QLineEdit("")
         self.end_edit = QLineEdit("")
@@ -185,6 +194,9 @@ class MainWindow(QMainWindow):
         self.btn_head_preview = QPushButton("처음 3초 미리듣기")
         self.btn_tail_preview = QPushButton("마지막 3초 미리듣기")
         self.btn_save_seg = QPushButton("세그먼트 저장")
+        for b in (self.btn_head_preview, self.btn_tail_preview, self.btn_save_seg):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.setMinimumHeight(28)
 
         self.btn_extract = QPushButton("무음/문장 경계 추출")
         self.btn_refine  = QPushButton("자동 보정 실행")
@@ -215,48 +227,70 @@ class MainWindow(QMainWindow):
         row_url.addWidget(self.btn_download); row_url.addWidget(QLabel("상태:")); row_url.addWidget(self.status_label)
         root_layout.addLayout(row_url)
 
+        row_vtt = QHBoxLayout(); row_vtt.setSpacing(6)
+        row_vtt.addWidget(QLabel("VTT 경로"))
+        row_vtt.addWidget(self.vtt_edit, 1)
+        row_vtt.addWidget(self.btn_vtt_download)
+        row_vtt.addWidget(self.btn_vtt_browse)
+        row_vtt.addWidget(self.btn_vtt_apply)
+
         row_prompts = QHBoxLayout(); row_prompts.setSpacing(6)
         row_prompts.addWidget(self.btn_copy_topic); row_prompts.addWidget(self.btn_copy_vtt); row_prompts.addWidget(self.btn_copy_thumb)
-        root_layout.addLayout(row_prompts)
+
         row_topics = QHBoxLayout(); row_topics.setSpacing(6)
         row_topics.addWidget(self.lbl_topics)
         row_topics.addStretch(1)
+        row_topics.addWidget(self.btn_apply_topic_results)
         row_topics.addWidget(self.btn_add_topic)
         row_topics.addWidget(self.btn_remove_topic)
-        row_topics.addWidget(self.btn_apply_topic_results)
+        row_topics.addWidget(self.btn_apply_vtt_topics)
+
+        root_layout.addLayout(row_vtt)
+        root_layout.addLayout(row_prompts)
         root_layout.addLayout(row_topics)
         root_layout.addWidget(self.list_topics)
 
-        row_vtt = QHBoxLayout(); row_vtt.setSpacing(6)
-        row_vtt.addWidget(QLabel("VTT 경로")); row_vtt.addWidget(self.vtt_edit, 1)
-        row_vtt.addWidget(self.btn_vtt_browse); row_vtt.addWidget(self.btn_vtt_download); row_vtt.addWidget(self.btn_vtt_apply)
-        root_layout.addLayout(row_vtt)
-
         mid = QHBoxLayout(); mid.setSpacing(10)
         left = QVBoxLayout(); left.setSpacing(6)
-        left.addWidget(self.lbl_segments)
-        left.addWidget(self.list_segments, 1)
-        nav = QHBoxLayout(); nav.addWidget(self.btn_prev); nav.addWidget(self.btn_next)
-        left.addLayout(nav)
-        cliprow = QHBoxLayout()
-        cliprow.addWidget(self.btn_apply_clipboard)
-        cliprow.addWidget(self.btn_copy_segments)
-        left.addLayout(cliprow)
-        mid.addLayout(left, 3)
+        info_segments = QHBoxLayout(); info_segments.setSpacing(8)
+
+        info_col = QVBoxLayout(); info_col.setSpacing(4)
+        info_col.addWidget(self.lbl_topic_summary)
+        info_col.addWidget(self.topic_summary_view, 1)
+
+        segments_col = QVBoxLayout(); segments_col.setSpacing(6)
+        seg_header = QHBoxLayout(); seg_header.setSpacing(6)
+        seg_header.addWidget(self.lbl_segments)
+        seg_header.addStretch(1)
+        seg_header.addWidget(self.btn_refine)
+        segments_col.addLayout(seg_header)
+        segments_col.addWidget(self.list_segments, 1)
+        seg_buttons = QGridLayout(); seg_buttons.setHorizontalSpacing(6); seg_buttons.setVerticalSpacing(6)
+        seg_buttons.setColumnStretch(0, 1); seg_buttons.setColumnStretch(1, 1)
+        seg_buttons.addWidget(self.btn_prev, 0, 0)
+        seg_buttons.addWidget(self.btn_next, 0, 1)
+        seg_buttons.addWidget(self.btn_apply_clipboard, 1, 0)
+        seg_buttons.addWidget(self.btn_copy_segments, 1, 1)
+        segments_col.addLayout(seg_buttons)
+
+        info_segments.addLayout(info_col, 9)
+        info_segments.addLayout(segments_col, 3)
+        left.addLayout(info_segments)
+        mid.addLayout(left, 7)
 
         right = QVBoxLayout(); right.setSpacing(6)
         grid_edit = QGridLayout(); grid_edit.setHorizontalSpacing(6); grid_edit.setVerticalSpacing(4)
-        grid_edit.addWidget(QLabel("Start"), 0, 0); grid_edit.addWidget(self.start_edit, 0, 1)
-        grid_edit.addWidget(self.btn_start_m1, 0, 2); grid_edit.addWidget(self.btn_start_p1, 0, 3); grid_edit.addWidget(self.btn_prev_rec, 0, 4)
-        grid_edit.addWidget(QLabel("End"), 1, 0); grid_edit.addWidget(self.end_edit, 1, 1)
-        grid_edit.addWidget(self.btn_end_m1, 1, 2); grid_edit.addWidget(self.btn_end_p1, 1, 3); grid_edit.addWidget(self.btn_next_rec, 1, 4)
+        grid_edit.addWidget(self.btn_extract, 0, 0, 1, 5)
+        grid_edit.addWidget(QLabel("Start"), 1, 0); grid_edit.addWidget(self.start_edit, 1, 1)
+        grid_edit.addWidget(self.btn_start_m1, 1, 2); grid_edit.addWidget(self.btn_start_p1, 1, 3); grid_edit.addWidget(self.btn_prev_rec, 1, 4)
+        grid_edit.addWidget(QLabel("End"), 2, 0); grid_edit.addWidget(self.end_edit, 2, 1)
+        grid_edit.addWidget(self.btn_end_m1, 2, 2); grid_edit.addWidget(self.btn_end_p1, 2, 3); grid_edit.addWidget(self.btn_next_rec, 2, 4)
+        grid_edit.addWidget(self.btn_head_preview, 3, 2)
+        grid_edit.addWidget(self.btn_tail_preview, 3, 3)
+        grid_edit.addWidget(self.btn_save_seg, 3, 4)
         right.addLayout(grid_edit)
 
-        row_tail = QHBoxLayout()
-        row_tail.addWidget(self.btn_head_preview); row_tail.addWidget(self.btn_tail_preview); row_tail.addWidget(self.btn_save_seg); row_tail.addStretch(1)
-        right.addLayout(row_tail)
-
-        right.addWidget(self.btn_extract); right.addWidget(self.btn_refine); right.addWidget(QLabel("로그")); right.addWidget(self.log_view, 1)
+        right.addWidget(QLabel("로그")); right.addWidget(self.log_view, 1)
         mid.addLayout(right, 5)
         root_layout.addLayout(mid, 1)
 
@@ -307,7 +341,9 @@ class MainWindow(QMainWindow):
         self.btn_apply_topic_results.clicked.connect(self.on_apply_topic_results)
         self.btn_add_topic.clicked.connect(self.on_add_topic)
         self.btn_remove_topic.clicked.connect(self.on_remove_topic)
+        self.btn_apply_vtt_topics.clicked.connect(self.on_apply_vtt_topic_results)
         self.list_topics.itemChanged.connect(self.on_topic_item_changed)
+        self.list_topics.itemSelectionChanged.connect(self.on_topic_selection_changed)
 
     # ---------- URL Persistence ----------
     def _load_saved_url(self) -> Optional[str]:
@@ -381,9 +417,20 @@ class MainWindow(QMainWindow):
         self.lbl_segments.setText(txt)
 
     # ---------- 토픽 목록 ----------
+    def _new_topic_detail(self, title: str) -> dict:
+        return {"title": title, "summary": "", "segments": []}
+
+    def _sync_topic_details(self):
+        if len(self.topic_details) < len(self.topic_results):
+            for idx in range(len(self.topic_details), len(self.topic_results)):
+                self.topic_details.append(self._new_topic_detail(self.topic_results[idx]))
+        elif len(self.topic_details) > len(self.topic_results):
+            self.topic_details = self.topic_details[:len(self.topic_results)]
+
     def refresh_topic_list(self):
         self._topic_list_updating = True
         self.list_topics.clear()
+        self._sync_topic_details()
         count = len(self.topic_results)
         self.lbl_topics.setText(f"토픽 목록 ({count})")
         if not count:
@@ -391,6 +438,7 @@ class MainWindow(QMainWindow):
             placeholder.setFlags(Qt.NoItemFlags)
             self.list_topics.addItem(placeholder)
             self._topic_list_updating = False
+            self._display_topic_detail(None)
             return
         for topic in self.topic_results:
             item = QListWidgetItem(topic)
@@ -407,8 +455,10 @@ class MainWindow(QMainWindow):
             self.log("토픽 이름을 입력해야 합니다.")
             return
         self.topic_results.append(topic)
+        self.topic_details.append(self._new_topic_detail(topic))
         self.refresh_topic_list()
         self.list_topics.setCurrentRow(len(self.topic_results) - 1)
+        self.on_topic_selection_changed()
         self.log(f"토픽을 추가했습니다: {topic}")
 
     def on_topic_item_changed(self, item: QListWidgetItem):
@@ -427,6 +477,8 @@ class MainWindow(QMainWindow):
         if new_text == self.topic_results[row]:
             return
         self.topic_results[row] = new_text
+        if 0 <= row < len(self.topic_details):
+            self.topic_details[row]["title"] = new_text
         self.log(f"토픽 #{row+1} 이름을 수정했습니다.")
 
     def on_remove_topic(self):
@@ -442,9 +494,15 @@ class MainWindow(QMainWindow):
             self.log("선택한 토픽을 찾을 수 없습니다.")
             return
         removed = self.topic_results.pop(idx)
+        if 0 <= idx < len(self.topic_details):
+            self.topic_details.pop(idx)
         self.refresh_topic_list()
         if self.topic_results:
-            self.list_topics.setCurrentRow(min(idx, len(self.topic_results) - 1))
+            new_idx = min(idx, len(self.topic_results) - 1)
+            self.list_topics.setCurrentRow(new_idx)
+            self.on_topic_selection_changed()
+        else:
+            self._display_topic_detail(None)
         self.log(f"토픽을 제거했습니다: {removed}")
 
     def on_apply_topic_results(self):
@@ -482,7 +540,11 @@ class MainWindow(QMainWindow):
             self.log("유효한 topic 문자열을 찾지 못했습니다.")
             return
         self.topic_results = topics
+        self.topic_details = [self._new_topic_detail(t) for t in topics]
         self.refresh_topic_list()
+        if self.topic_results:
+            self.list_topics.setCurrentRow(0)
+            self.on_topic_selection_changed()
         self.log(f"분석 결과 토픽 {len(topics)}건을 반영했습니다.")
 
     def _coerce_topic_payload(self, payload):
@@ -495,6 +557,179 @@ class MainWindow(QMainWindow):
         if isinstance(payload, list):
             return payload
         return []
+
+    def on_topic_selection_changed(self):
+        if self._topic_list_updating:
+            return
+        idxs = self.list_topics.selectedIndexes()
+        if not idxs:
+            self._display_topic_detail(None)
+            return
+        idx = idxs[0].row()
+        self._display_topic_detail(idx)
+
+    def _display_topic_detail(self, idx: Optional[int]):
+        self._apply_output_suffix(idx)
+        if idx is None or not (0 <= idx < len(self.topic_details)):
+            self.topic_summary_view.clear()
+            return
+        detail = self.topic_details[idx]
+        self.topic_summary_view.setPlainText(detail.get("summary", ""))
+        segments = detail.get("segments") or []
+        if segments:
+            self.segments = [(float(s), float(e)) for s, e in segments]
+            self.refresh_segment_list()
+            self.list_segments.setCurrentRow(0)
+            self.apply_selected_to_fields(0)
+        else:
+            self.segments = []
+            self.refresh_segment_list()
+            self.start_edit.clear()
+            self.end_edit.clear()
+    def _apply_output_suffix(self, idx: Optional[int]):
+        current = self.output_edit.text().strip() or OUTPUT_DEFAULT
+        base = self._strip_topic_suffix(current)
+        if idx is None or idx < 0:
+            if base != current:
+                self.output_edit.setText(base)
+            return
+        directory, filename = os.path.split(base)
+        name, ext = os.path.splitext(filename)
+        suffixed = f"{name}_{idx+1:03d}{ext}"
+        new_path = os.path.join(directory, suffixed) if directory else suffixed
+        if new_path != current:
+            self.output_edit.setText(new_path)
+    def _strip_topic_suffix(self, path: str) -> str:
+        directory, filename = os.path.split(path)
+        if not filename:
+            return path
+        name, ext = os.path.splitext(filename)
+        base_name = re.sub(r"_(\d{3})$", "", name)
+        new_filename = f"{base_name}{ext}"
+        return os.path.join(directory, new_filename) if directory else new_filename
+
+    def on_apply_vtt_topic_results(self):
+        raw = (QGuiApplication.clipboard().text() or "").strip()
+        if not raw:
+            self.log("클립보드에 텍스트가 없습니다.")
+            return
+        entries = self._parse_vtt_sections(raw)
+        if not entries:
+            self.log("VTT 분석 결과를 파싱하지 못했습니다.")
+            return
+        self.topic_results = [entry["title"] for entry in entries]
+        self.topic_details = entries
+        self.refresh_topic_list()
+        if self.topic_results:
+            self.list_topics.setCurrentRow(0)
+            self.on_topic_selection_changed()
+        self.log(f"VTT 분석 결과 토픽 {len(entries)}건을 반영했습니다.")
+
+    def _parse_vtt_sections(self, text: str) -> List[dict]:
+        text = text.strip()
+        if not text:
+            return []
+        pattern = re.compile(r"(주제\s*\d+\s*:.*?)(?=주제\s*\d+\s*:|$)", re.DOTALL)
+        entries: List[dict] = []
+        for match in pattern.finditer(text):
+            section = match.group(1).strip()
+            if not section:
+                continue
+            lines = section.splitlines()
+            if not lines:
+                continue
+            title_match = re.match(r"주제\s*\d+\s*:\s*(.+)", lines[0].strip())
+            if not title_match:
+                continue
+            title = title_match.group(1).strip()
+            body = "\n".join(lines[1:]).strip()
+            summary, segments = self._parse_vtt_body(body)
+            detail = self._new_topic_detail(title)
+            detail["summary"] = summary
+            detail["segments"] = segments
+            entries.append(detail)
+        return entries
+
+    def _parse_vtt_body(self, body: str):
+        if not body:
+            return "", []
+        json_pattern = re.compile(r"\bJSON\b", re.IGNORECASE)
+        json_match = json_pattern.search(body)
+        desc_text = body
+        json_payload = ""
+        if json_match:
+            desc_text = body[:json_match.start()].strip()
+            json_payload = body[json_match.end():].strip()
+        summary = self._extract_summary(desc_text)
+        segments = self._parse_json_segments(json_payload)
+        return summary, segments
+
+    def _extract_summary(self, text_block: str):
+        if not text_block:
+            return ""
+        lines = text_block.splitlines()
+        filtered_lines = []
+        length_line = ""
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                filtered_lines.append("")
+                continue
+            if stripped.startswith("총길이"):
+                length_line = stripped
+            else:
+                filtered_lines.append(stripped)
+        normalized = "\n".join(filtered_lines).strip()
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", normalized) if p.strip()]
+        summary = normalized if not paragraphs else "\n\n".join(paragraphs)
+        if length_line:
+            summary = (summary + ("\n\n" if summary else "") + length_line).strip()
+        return summary
+
+    def _parse_json_segments(self, payload: str) -> List[Tuple[float, float]]:
+        if not payload:
+            return []
+        array_text = self._extract_json_array_text(payload)
+        if not array_text:
+            return []
+        try:
+            data = json.loads(array_text)
+        except Exception as ex:
+            self.log(f"JSON 구간 파싱 실패: {ex}")
+            return []
+        segments: List[Tuple[float, float]] = []
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                start_val = item.get("start")
+                end_val = item.get("end")
+                if start_val is None or end_val is None:
+                    continue
+                try:
+                    s = hms_to_sec(str(start_val))
+                    e = hms_to_sec(str(end_val))
+                except Exception:
+                    continue
+                if e - s <= 0:
+                    continue
+                segments.append((s, e))
+        return segments
+
+    def _extract_json_array_text(self, text: str) -> Optional[str]:
+        start = text.find("[")
+        if start == -1:
+            return None
+        depth = 0
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start:idx+1]
+        return None
 
     # ---------- 초기 세그먼트 ----------
     def _load_default_segments(self):
@@ -866,11 +1101,19 @@ class MainWindow(QMainWindow):
     def copy_vtt_prompt(self):
         topics = [t.strip() for t in self.topic_results if t.strip()]
         if topics:
-            topic_block = "\n".join(f"- {t}" for t in topics)
+            topic_block = "\n".join(topics)
         else:
-            topic_block = "토픽을 여기 정리하세요"
-            self.log("토픽 목록이 비어 있어 기본 안내 문구로 복사합니다.")
-        prompt = VTT_ANALYSIS_PROMPT.replace("{주제}", topic_block)
+            topic_block = "토픽을 먼저 입력하세요."
+            self.log("토픽 목록이 비어 있어 안내 문구로 대체합니다.")
+        prompt_template = VTT_ANALYSIS_PROMPT
+        injection_target = "**{주제}:**"
+        if injection_target in prompt_template:
+            prompt_template = prompt_template.replace(
+                injection_target,
+                f"{injection_target}\n{topic_block}",
+                1,
+            )
+        prompt = prompt_template
         self.copy_to_clipboard(prompt, "VTT 분석 프롬프트 복사 완료")
     def copy_to_clipboard(self, text: str, ok_log: str):
         QGuiApplication.clipboard().setText(text); self.log(ok_log)
