@@ -12,7 +12,10 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
+from pathlib import Path
+
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -45,6 +48,8 @@ from ..config import (
 from ..controller import VideoEditingController
 from ..utils.paths import guess_workdir, original_video_path_of
 from ..utils.timecode import hms_to_sec, sec_to_hms
+
+LAST_URL_FILE = Path(__file__).resolve().parent.parent / "last_url.txt"
 
 # =========================
 # Busy / Invoker
@@ -104,6 +109,10 @@ class MainWindow(QMainWindow):
         self.sentence_bounds: List[float] = []
         self.media_duration: Optional[float] = None
         self.original_path: Optional[str] = None
+        self.topic_results: List[str] = []
+        self._topic_list_updating = False
+        self._last_url_file = LAST_URL_FILE
+        self._initial_url = self._load_saved_url() or DEFAULT_URL
 
         # Busy + Watchdog + Invoker
         self.busy = BusyManager()
@@ -116,12 +125,13 @@ class MainWindow(QMainWindow):
         # UI
         self._build_widgets()
         self._build_layout()
+        self.refresh_topic_list()
         self._connect_signals()
         self._load_default_segments()
 
     # ---------- Widgets ----------
     def _build_widgets(self):
-        self.url_edit = QLineEdit(DEFAULT_URL)
+        self.url_edit = QLineEdit(self._initial_url)
         self.btn_download = QPushButton("원본 확인/다운로드")
         self.status_label = QLabel("확인 전")
 
@@ -131,6 +141,16 @@ class MainWindow(QMainWindow):
         for b in (self.btn_copy_topic, self.btn_copy_vtt, self.btn_copy_thumb):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setMinimumHeight(36)
+        self.btn_apply_topic_results = QPushButton("분석 결과 반영")
+        self.lbl_topics = QLabel("토픽 목록 (0)")
+        self.list_topics = QListWidget()
+        self.list_topics.setAlternatingRowColors(True)
+        self.list_topics.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        self.list_topics.setMaximumHeight(170)
 
         self.vtt_edit = QLineEdit("")
         self.btn_vtt_browse = QPushButton("찾기")
@@ -195,6 +215,12 @@ class MainWindow(QMainWindow):
         row_prompts = QHBoxLayout(); row_prompts.setSpacing(6)
         row_prompts.addWidget(self.btn_copy_topic); row_prompts.addWidget(self.btn_copy_vtt); row_prompts.addWidget(self.btn_copy_thumb)
         root_layout.addLayout(row_prompts)
+        row_topics = QHBoxLayout(); row_topics.setSpacing(6)
+        row_topics.addWidget(self.lbl_topics)
+        row_topics.addStretch(1)
+        row_topics.addWidget(self.btn_apply_topic_results)
+        root_layout.addLayout(row_topics)
+        root_layout.addWidget(self.list_topics)
 
         row_vtt = QHBoxLayout(); row_vtt.setSpacing(6)
         row_vtt.addWidget(QLabel("VTT 경로")); row_vtt.addWidget(self.vtt_edit, 1)
@@ -271,8 +297,32 @@ class MainWindow(QMainWindow):
         self.btn_output_browse.clicked.connect(self.on_output_save)
         self.btn_render.clicked.connect(self.on_render)
         self.btn_copy_topic.clicked.connect(self.copy_topic_prompt)
-        self.btn_copy_vtt.clicked.connect(lambda: self.copy_to_clipboard(VTT_ANALYSIS_PROMPT, "VTT 분석 프롬프트 복사 완료"))
+        self.btn_copy_vtt.clicked.connect(self.copy_vtt_prompt)
         self.btn_copy_thumb.clicked.connect(lambda: self.copy_to_clipboard(THUMBNAIL_PROMPT, "썸네일 프롬프트 복사 완료"))
+        self.btn_apply_topic_results.clicked.connect(self.on_apply_topic_results)
+        self.list_topics.itemChanged.connect(self.on_topic_item_changed)
+
+    # ---------- URL Persistence ----------
+    def _load_saved_url(self) -> Optional[str]:
+        path = getattr(self, "_last_url_file", LAST_URL_FILE)
+        try:
+            if path.exists():
+                data = path.read_text(encoding="utf-8").strip()
+                if data:
+                    return data
+        except Exception as ex:
+            print(f"[last-url] load failed: {ex}", flush=True)
+        return None
+
+    def _save_last_url(self, url: str):
+        if not url:
+            return
+        path = getattr(self, "_last_url_file", LAST_URL_FILE)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(url.strip(), encoding="utf-8")
+        except Exception as ex:
+            print(f"[last-url] save failed: {ex}", flush=True)
 
     # ---------- Busy/UI ----------
     def on_busy_changed(self, active: int): print(f"[busy] active={active}", flush=True)
@@ -323,6 +373,91 @@ class MainWindow(QMainWindow):
             txt = f"세그먼트 목록  (총 {mm:02d}:{ss:02d})"
         self.lbl_segments.setText(txt)
 
+    # ---------- 토픽 목록 ----------
+    def refresh_topic_list(self):
+        self._topic_list_updating = True
+        self.list_topics.clear()
+        count = len(self.topic_results)
+        self.lbl_topics.setText(f"토픽 목록 ({count})")
+        if not count:
+            placeholder = QListWidgetItem("분석 결과를 반영하면 토픽이 표시됩니다.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.list_topics.addItem(placeholder)
+            self._topic_list_updating = False
+            return
+        for topic in self.topic_results:
+            item = QListWidgetItem(topic)
+            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+            self.list_topics.addItem(item)
+        self._topic_list_updating = False
+
+    def on_topic_item_changed(self, item: QListWidgetItem):
+        if self._topic_list_updating:
+            return
+        row = self.list_topics.row(item)
+        if not (0 <= row < len(self.topic_results)):
+            return
+        new_text = item.text().strip()
+        if not new_text:
+            self._topic_list_updating = True
+            item.setText(self.topic_results[row])
+            self._topic_list_updating = False
+            self.log("토픽 이름은 비울 수 없습니다.")
+            return
+        if new_text == self.topic_results[row]:
+            return
+        self.topic_results[row] = new_text
+        self.log(f"토픽 #{row+1} 이름을 수정했습니다.")
+
+    def on_apply_topic_results(self):
+        raw = (QGuiApplication.clipboard().text() or "").strip()
+        if not raw:
+            self.log("클립보드에 JSON 데이터가 없습니다.")
+            return
+        cleaned = re.sub(r"^```(json)?", "", raw, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as ex:
+            self.log(f"분석 결과 JSON 파싱 실패: {ex}")
+            return
+        proposals = self._coerce_topic_payload(payload)
+        if not proposals:
+            self.log("JSON에서 video_proposals 데이터를 찾을 수 없습니다.")
+            return
+        topics: List[str] = []
+        for idx, entry in enumerate(proposals, start=1):
+            topic_value = None
+            if isinstance(entry, dict):
+                topic_value = entry.get("topic")
+            elif isinstance(entry, str):
+                topic_value = entry
+            if topic_value is None:
+                self.log(f"{idx}번째 항목에 topic 정보가 없습니다.")
+                continue
+            topic_text = str(topic_value).strip()
+            if not topic_text:
+                self.log(f"{idx}번째 topic 문자열이 비어 있습니다.")
+                continue
+            topics.append(topic_text)
+        if not topics:
+            self.log("유효한 topic 문자열을 찾지 못했습니다.")
+            return
+        self.topic_results = topics
+        self.refresh_topic_list()
+        self.log(f"분석 결과 토픽 {len(topics)}건을 반영했습니다.")
+
+    def _coerce_topic_payload(self, payload):
+        if isinstance(payload, dict):
+            for key in ("video_proposals", "proposals", "topics"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            return [payload]
+        if isinstance(payload, list):
+            return payload
+        return []
+
     # ---------- 초기 세그먼트 ----------
     def _load_default_segments(self):
         try:
@@ -371,6 +506,8 @@ class MainWindow(QMainWindow):
     # ---------- 다운로드 ----------
     def on_download(self):
         url = self.url_edit.text().strip()
+        if url:
+            self._save_last_url(url)
         out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
         self.original_path = original_video_path_of(out_path)
         if os.path.exists(self.original_path):
@@ -688,6 +825,15 @@ class MainWindow(QMainWindow):
         url = self.url_edit.text().strip()
         prompt = TOPIC_PROMPT.replace("분석 대상 영상 : {}", f"분석 대상 영상 : {url}")
         self.copy_to_clipboard(prompt, "분석 프롬프트 복사 완료")
+    def copy_vtt_prompt(self):
+        topics = [t.strip() for t in self.topic_results if t.strip()]
+        if topics:
+            topic_block = "\n".join(f"- {t}" for t in topics)
+        else:
+            topic_block = "토픽을 여기 정리하세요"
+            self.log("토픽 목록이 비어 있어 기본 안내 문구로 복사합니다.")
+        prompt = VTT_ANALYSIS_PROMPT.replace("{주제}", topic_block)
+        self.copy_to_clipboard(prompt, "VTT 분석 프롬프트 복사 완료")
     def copy_to_clipboard(self, text: str, ok_log: str):
         QGuiApplication.clipboard().setText(text); self.log(ok_log)
     def on_apply_segments_from_clipboard(self):
