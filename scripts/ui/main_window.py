@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         self.btn_render.clicked.connect(self.on_render)
         self.btn_copy_topic.clicked.connect(self.copy_topic_prompt)
         self.btn_copy_vtt.clicked.connect(self.copy_vtt_prompt)
-        self.btn_copy_thumb.clicked.connect(lambda: self.copy_to_clipboard(THUMBNAIL_PROMPT, "썸네일 프롬프트 복사 완료"))
+        self.btn_copy_thumb.clicked.connect(self.copy_thumbnail_prompt)
         self.btn_apply_topic_results.clicked.connect(self.on_apply_topic_results)
         self.btn_add_topic.clicked.connect(self.on_add_topic)
         self.btn_remove_topic.clicked.connect(self.on_remove_topic)
@@ -504,6 +504,9 @@ class MainWindow(QMainWindow):
             item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
             self.list_topics.addItem(item)
         self._topic_list_updating = False
+    def current_topic_index(self) -> int:
+        idxs = self.list_topics.selectedIndexes()
+        return idxs[0].row() if idxs else -1
 
     def on_add_topic(self):
         text, ok = QInputDialog.getText(self, "토픽 추가", "새 토픽 이름을 입력하세요.")
@@ -620,11 +623,10 @@ class MainWindow(QMainWindow):
     def on_topic_selection_changed(self):
         if self._topic_list_updating:
             return
-        idxs = self.list_topics.selectedIndexes()
-        if not idxs:
+        idx = self.current_topic_index()
+        if idx == -1:
             self._display_topic_detail(None)
             return
-        idx = idxs[0].row()
         self._display_topic_detail(idx)
 
     def _display_topic_detail(self, idx: Optional[int]):
@@ -659,25 +661,39 @@ class MainWindow(QMainWindow):
         normalized = self._normalize_path(new_path)
         if normalized != current:
             self.output_edit.setText(normalized)
+    def _base_output_path(self) -> str:
+        raw = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
+        return self._strip_topic_suffix(raw)
     def _strip_topic_suffix(self, path: str) -> str:
+        path = self._normalize_path(path)
         directory, filename = os.path.split(path)
         if not filename:
             return path
         name, ext = os.path.splitext(filename)
         base_name = re.sub(r"_(\d{3})$", "", name)
         new_filename = f"{base_name}{ext}"
-        return os.path.join(directory, new_filename) if directory else new_filename
+        result = os.path.join(directory, new_filename) if directory else new_filename
+        return self._normalize_path(result)
     def _normalize_path(self, path: Optional[str]) -> str:
         return path.replace("\\", "/") if path else ""
+    def _selected_topic_summary(self) -> str:
+        idx = self.current_topic_index()
+        if 0 <= idx < len(self.topic_details):
+            return (self.topic_details[idx].get("summary") or "").strip()
+        if 0 <= idx < len(self.topic_results):
+            return (self.topic_results[idx] or "").strip()
+        return ""
+    def _selected_topic_title(self) -> str:
+        idx = self.current_topic_index()
+        if 0 <= idx < len(self.topic_results):
+            return self.topic_results[idx].strip()
+        return ""
     def _resolve_original_path(self) -> Optional[str]:
         candidates = []
         if self.original_path:
-            candidates.append(self.original_path)
-        out_path = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
-        candidates.append(original_video_path_of(out_path))
-        base_out = self._strip_topic_suffix(out_path)
-        if base_out != out_path:
-            candidates.append(original_video_path_of(base_out))
+            candidates.append(self._normalize_path(self.original_path))
+        base_out = self._base_output_path()
+        candidates.append(original_video_path_of(base_out))
         seen = set()
         for path in candidates:
             if not path or path in seen:
@@ -894,8 +910,8 @@ class MainWindow(QMainWindow):
             self.status_label.setText(status)
             self.log(f"원본 영상 확인 완료: {existing}")
             return
-        out_path = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
-        self.original_path = original_video_path_of(out_path)
+        base_out = self._base_output_path()
+        self.original_path = original_video_path_of(base_out)
         self.status_label.setText("다운로드 중...")
         tok = self.progress_acquire("다운로드 준비중...")
         def hook(d):
@@ -1055,30 +1071,32 @@ class MainWindow(QMainWindow):
         threading.Thread(target=lambda: os.system(cmd), daemon=True).start()
 
     def on_head_preview(self):
-        if not self.segments: self.log("세그먼트가 없습니다."); return
-        out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
-        self.original_path = original_video_path_of(out_path)
-        if not (self.original_path and os.path.exists(self.original_path)):
-            self.log("원본 영상이 없습니다. 먼저 다운로드 하세요."); return
+        if not self.segments:
+            self.log("세그먼트가 없습니다.")
+            return
+        media_path = self._require_original_path()
+        if not media_path:
+            return
         idx = self.current_segment_index()
         s, e = self.segments[idx]
         start = max(0.0, min(s, self.media_duration or s))
         dur = min(HEAD_PREVIEW_SEC, max(0.1, e - s))
-        self._play_preview(start, dur, self.original_path)
+        self._play_preview(start, dur, media_path)
         self.log(f"처음 미리듣기: {sec_to_hms(start)} ~ {sec_to_hms(start+dur)} ({dur:.2f}s)")
 
     def on_tail_preview(self):
-        if not self.segments: self.log("세그먼트가 없습니다."); return
-        out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
-        self.original_path = original_video_path_of(out_path)
-        if not (self.original_path and os.path.exists(self.original_path)):
-            self.log("원본 영상이 없습니다. 먼저 다운로드 하세요."); return
+        if not self.segments:
+            self.log("세그먼트가 없습니다.")
+            return
+        media_path = self._require_original_path()
+        if not media_path:
+            return
         idx = self.current_segment_index()
         s, e = self.segments[idx]
         e = min(e, self.media_duration or e)
         start = max(s, e - TAIL_PREVIEW_SEC)
         dur = max(0.1, e - start)
-        self._play_preview(start, dur, self.original_path)
+        self._play_preview(start, dur, media_path)
         self.log(f"마지막 미리듣기: {sec_to_hms(start)} ~ {sec_to_hms(e)} ({dur:.2f}s)")
 
     def on_save_current_segment(self):
@@ -1094,35 +1112,42 @@ class MainWindow(QMainWindow):
 
     # ---------- 추출/보정 ----------
     def on_extract(self):
-        out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
-        self.original_path = original_video_path_of(out_path)
-        if not (self.original_path and os.path.exists(self.original_path)):
-            self.log("원본 영상이 없습니다. 먼저 다운로드 하세요."); return
-        if self.media_duration is None: self.media_duration = self.controller.get_media_duration(self.original_path)
-        tok = self.progress_acquire("무음/문장 경계 추출 중..."); self.log("무음/문장 경계 추출 시작")
+        media_path = self._require_original_path()
+        if not media_path:
+            return
+        if self.media_duration is None:
+            self.media_duration = self.controller.get_media_duration(media_path)
+        tok = self.progress_acquire("무음/문장 경계 추출 중...")
+        self.log("무음/문장 경계 추출 시작")
         def worker():
             try:
                 spans = self.controller.detect_silence(
-                    self.original_path,
+                    media_path,
                     media_duration=self.media_duration,
                     progress_cb=self.ui_progress_update,
                     timeout_factor=1.4,
                 )
-                self.ui(self._set_silence_spans, spans); self.ui(self.log, f"무음 구간 수: {len(spans)}")
+                self.ui(self._set_silence_spans, spans)
+                self.ui(self.log, f"무음 구간 총 {len(spans)}개")
                 vtt = self.vtt_edit.text().strip() or None
+                bounds: List[float] = []
                 if vtt and os.path.exists(vtt) and SegmentAnalyzer.has_webvtt():
                     self.ui(self.progress_set, 90 if self.media_duration else 100, "VTT 분석 중...")
                     bounds = self.controller.sentence_bounds(vtt, max_gap=0.4)
-                    self.ui(self.set_sentence_bounds, bounds); self.ui(self.log, f"문장 경계 수: {len(bounds)}")
+                    self.ui(self.set_sentence_bounds, bounds)
+                    self.ui(self.log, f"문장 경계 총 {len(bounds)}개")
                 else:
-                    self.ui(self.set_sentence_bounds, []); self.ui(self.log, "VTT 미지정 또는 webvtt 미설치 → 문장 경계 생략")
+                    self.ui(self.set_sentence_bounds, [])
+                    self.ui(self.log, "VTT 미선택 또는 webvtt 미설치로 문장 경계 생략")
+                self._save_boundary_cache(spans, bounds)
                 self.ui(self.progress_set, 100, "경계 추출 완료")
             except TimeoutError as te:
                 self.ui(self.log, f"[경계 추출 타임아웃] {te}")
             except Exception as ex:
                 self.ui(self.log, f"[경계 추출 오류] {ex}")
             finally:
-                self.ui(self.progress_release, tok); self.ui(self.log, "경계 추출 종료")
+                self.ui(self.progress_release, tok)
+                self.ui(self.log, "경계 추출 종료")
         threading.Thread(target=worker, daemon=True).start()
 
     def ui_progress_update(self, pct: int, msg: str = ""): self.ui(self.progress_set, pct, msg)
@@ -1229,6 +1254,25 @@ class MainWindow(QMainWindow):
             )
         prompt = prompt_template
         self.copy_to_clipboard(prompt, "VTT 분석 프롬프트 복사 완료")
+    def copy_thumbnail_prompt(self):
+        summary = self._selected_topic_summary()
+        topic = self._selected_topic_title()
+        if not summary:
+            summary = "토픽 관련 설명이 없습니다."
+            self.log("선택된 토픽의 관련 설명이 없어 기본 문구를 사용했습니다.")
+        lines = THUMBNAIL_PROMPT.splitlines()
+        marker = "** 내용 :"
+        for idx, line in enumerate(lines):
+            if line.strip() == marker.strip():
+                insert_lines = []
+                if topic:
+                    insert_lines.append(topic)
+                insert_lines.append(summary)
+                for offset, text in enumerate(insert_lines, start=1):
+                    lines.insert(idx + offset, text)
+                break
+        prompt = "\n".join(lines)
+        self.copy_to_clipboard(prompt, "썸네일 프롬프트 복사 완료")
     def copy_to_clipboard(self, text: str, ok_log: str):
         QGuiApplication.clipboard().setText(text); self.log(ok_log)
     def on_apply_segments_from_clipboard(self):
