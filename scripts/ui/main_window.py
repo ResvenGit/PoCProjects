@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -142,6 +143,8 @@ class MainWindow(QMainWindow):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setMinimumHeight(36)
         self.btn_apply_topic_results = QPushButton("분석 결과 반영")
+        self.btn_remove_topic = QPushButton("선택 토픽 제거")
+        self.btn_add_topic = QPushButton("토픽 추가")
         self.lbl_topics = QLabel("토픽 목록 (0)")
         self.list_topics = QListWidget()
         self.list_topics.setAlternatingRowColors(True)
@@ -218,6 +221,8 @@ class MainWindow(QMainWindow):
         row_topics = QHBoxLayout(); row_topics.setSpacing(6)
         row_topics.addWidget(self.lbl_topics)
         row_topics.addStretch(1)
+        row_topics.addWidget(self.btn_add_topic)
+        row_topics.addWidget(self.btn_remove_topic)
         row_topics.addWidget(self.btn_apply_topic_results)
         root_layout.addLayout(row_topics)
         root_layout.addWidget(self.list_topics)
@@ -300,6 +305,8 @@ class MainWindow(QMainWindow):
         self.btn_copy_vtt.clicked.connect(self.copy_vtt_prompt)
         self.btn_copy_thumb.clicked.connect(lambda: self.copy_to_clipboard(THUMBNAIL_PROMPT, "썸네일 프롬프트 복사 완료"))
         self.btn_apply_topic_results.clicked.connect(self.on_apply_topic_results)
+        self.btn_add_topic.clicked.connect(self.on_add_topic)
+        self.btn_remove_topic.clicked.connect(self.on_remove_topic)
         self.list_topics.itemChanged.connect(self.on_topic_item_changed)
 
     # ---------- URL Persistence ----------
@@ -391,6 +398,19 @@ class MainWindow(QMainWindow):
             self.list_topics.addItem(item)
         self._topic_list_updating = False
 
+    def on_add_topic(self):
+        text, ok = QInputDialog.getText(self, "토픽 추가", "새 토픽 이름을 입력하세요.")
+        if not ok:
+            return
+        topic = text.strip()
+        if not topic:
+            self.log("토픽 이름을 입력해야 합니다.")
+            return
+        self.topic_results.append(topic)
+        self.refresh_topic_list()
+        self.list_topics.setCurrentRow(len(self.topic_results) - 1)
+        self.log(f"토픽을 추가했습니다: {topic}")
+
     def on_topic_item_changed(self, item: QListWidgetItem):
         if self._topic_list_updating:
             return
@@ -408,6 +428,24 @@ class MainWindow(QMainWindow):
             return
         self.topic_results[row] = new_text
         self.log(f"토픽 #{row+1} 이름을 수정했습니다.")
+
+    def on_remove_topic(self):
+        if not self.topic_results:
+            self.log("제거할 토픽이 없습니다.")
+            return
+        idxs = self.list_topics.selectedIndexes()
+        if not idxs:
+            self.log("먼저 토픽 목록에서 항목을 선택하세요.")
+            return
+        idx = idxs[0].row()
+        if not (0 <= idx < len(self.topic_results)):
+            self.log("선택한 토픽을 찾을 수 없습니다.")
+            return
+        removed = self.topic_results.pop(idx)
+        self.refresh_topic_list()
+        if self.topic_results:
+            self.list_topics.setCurrentRow(min(idx, len(self.topic_results) - 1))
+        self.log(f"토픽을 제거했습니다: {removed}")
 
     def on_apply_topic_results(self):
         raw = (QGuiApplication.clipboard().text() or "").strip()
