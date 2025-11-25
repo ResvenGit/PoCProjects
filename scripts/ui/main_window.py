@@ -50,7 +50,10 @@ from ..controller import VideoEditingController
 from ..utils.paths import guess_workdir, original_video_path_of
 from ..utils.timecode import hms_to_sec, sec_to_hms
 
-LAST_URL_FILE = Path(__file__).resolve().parent.parent / "last_url.txt"
+BASE_DIR = Path(__file__).resolve().parent.parent
+LAST_URL_FILE = BASE_DIR / "last_url.txt"
+BOUNDARY_CACHE_FILE = BASE_DIR / "boundary_cache.json"
+MEDIA_PATHS_FILE = BASE_DIR / "media_paths.json"
 
 # =========================
 # Busy / Invoker
@@ -115,6 +118,7 @@ class MainWindow(QMainWindow):
         self._topic_list_updating = False
         self._last_url_file = LAST_URL_FILE
         self._initial_url = self._load_saved_url() or DEFAULT_URL
+        self._media_paths = self._load_media_paths()
 
         # Busy + Watchdog + Invoker
         self.busy = BusyManager()
@@ -199,13 +203,16 @@ class MainWindow(QMainWindow):
             b.setMinimumHeight(28)
 
         self.btn_extract = QPushButton("무음/문장 경계 추출")
+        self.btn_load_boundaries = QPushButton("경계 불러오기")
         self.btn_refine  = QPushButton("자동 보정 실행")
 
-        self.intro_edit = QLineEdit(INTRO_DEFAULT)
+        intro_path = self._media_paths.get("intro") or INTRO_DEFAULT
+        outro_path = self._media_paths.get("outro") or OUTRO_DEFAULT
+        self.intro_edit = QLineEdit(intro_path)
         self.btn_intro_browse = QPushButton("찾기")
-        self.outro_edit = QLineEdit(OUTRO_DEFAULT)
+        self.outro_edit = QLineEdit(outro_path)
         self.btn_outro_browse = QPushButton("찾기")
-        self.output_edit = QLineEdit(OUTPUT_DEFAULT)
+        self.output_edit = QLineEdit(self._normalize_path(OUTPUT_DEFAULT))
         self.btn_output_browse = QPushButton("저장위치")
 
         self.btn_render = QPushButton("최종 영상 생성")
@@ -280,7 +287,9 @@ class MainWindow(QMainWindow):
 
         right = QVBoxLayout(); right.setSpacing(6)
         grid_edit = QGridLayout(); grid_edit.setHorizontalSpacing(6); grid_edit.setVerticalSpacing(4)
-        grid_edit.addWidget(self.btn_extract, 0, 0, 1, 5)
+        grid_edit.setColumnStretch(1, 1)
+        grid_edit.addWidget(self.btn_extract, 0, 0, 1, 3)
+        grid_edit.addWidget(self.btn_load_boundaries, 0, 3, 1, 2)
         grid_edit.addWidget(QLabel("Start"), 1, 0); grid_edit.addWidget(self.start_edit, 1, 1)
         grid_edit.addWidget(self.btn_start_m1, 1, 2); grid_edit.addWidget(self.btn_start_p1, 1, 3); grid_edit.addWidget(self.btn_prev_rec, 1, 4)
         grid_edit.addWidget(QLabel("End"), 2, 0); grid_edit.addWidget(self.end_edit, 2, 1)
@@ -331,8 +340,9 @@ class MainWindow(QMainWindow):
         self.btn_save_seg.clicked.connect(self.on_save_current_segment)
         self.btn_extract.clicked.connect(self.on_extract)
         self.btn_refine.clicked.connect(self.on_refine)
-        self.btn_intro_browse.clicked.connect(lambda: self.browse_file(self.intro_edit, "동영상 (*.mp4 *.mov *.mkv)"))
-        self.btn_outro_browse.clicked.connect(lambda: self.browse_file(self.outro_edit, "동영상 (*.mp4 *.mov *.mkv)"))
+        self.btn_load_boundaries.clicked.connect(self.on_load_boundaries)
+        self.btn_intro_browse.clicked.connect(self.on_intro_browse)
+        self.btn_outro_browse.clicked.connect(self.on_outro_browse)
         self.btn_output_browse.clicked.connect(self.on_output_save)
         self.btn_render.clicked.connect(self.on_render)
         self.btn_copy_topic.clicked.connect(self.copy_topic_prompt)
@@ -366,6 +376,55 @@ class MainWindow(QMainWindow):
             path.write_text(url.strip(), encoding="utf-8")
         except Exception as ex:
             print(f"[last-url] save failed: {ex}", flush=True)
+
+    def _load_media_paths(self) -> dict:
+        try:
+            if MEDIA_PATHS_FILE.exists():
+                data = json.loads(MEDIA_PATHS_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception as ex:
+            print(f"[media-paths] load failed: {ex}", flush=True)
+        return {}
+
+    def _save_media_paths(self):
+        data = {
+            "intro": self.intro_edit.text().strip() or "",
+            "outro": self.outro_edit.text().strip() or "",
+        }
+        try:
+            MEDIA_PATHS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MEDIA_PATHS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[media-paths] saved -> {MEDIA_PATHS_FILE}", flush=True)
+        except Exception as ex:
+            print(f"[media-paths] save failed: {ex}", flush=True)
+
+    def _save_boundary_cache(self, spans: List[Tuple[float, float]], bounds: List[float]):
+        data = {
+            "silence_spans": [[float(s), float(e)] for s, e in spans],
+            "sentence_bounds": [float(b) for b in bounds],
+        }
+        try:
+            BOUNDARY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BOUNDARY_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[boundaries] cache saved -> {BOUNDARY_CACHE_FILE}", flush=True)
+        except Exception as ex:
+            print(f"[boundaries] save failed: {ex}", flush=True)
+
+    def _load_boundary_cache_data(self):
+        if not BOUNDARY_CACHE_FILE.exists():
+            return None
+        try:
+            data = json.loads(BOUNDARY_CACHE_FILE.read_text(encoding="utf-8"))
+            spans = []
+            for item in data.get("silence_spans", []):
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    spans.append((float(item[0]), float(item[1])))
+            bounds = [float(x) for x in data.get("sentence_bounds", [])]
+            return spans, bounds
+        except Exception as ex:
+            self.log(f"경계 파일 읽기 실패: {ex}")
+            return None
 
     # ---------- Busy/UI ----------
     def on_busy_changed(self, active: int): print(f"[busy] active={active}", flush=True)
@@ -591,14 +650,15 @@ class MainWindow(QMainWindow):
         base = self._strip_topic_suffix(current)
         if idx is None or idx < 0:
             if base != current:
-                self.output_edit.setText(base)
+                self.output_edit.setText(self._normalize_path(base))
             return
         directory, filename = os.path.split(base)
         name, ext = os.path.splitext(filename)
         suffixed = f"{name}_{idx+1:03d}{ext}"
         new_path = os.path.join(directory, suffixed) if directory else suffixed
-        if new_path != current:
-            self.output_edit.setText(new_path)
+        normalized = self._normalize_path(new_path)
+        if normalized != current:
+            self.output_edit.setText(normalized)
     def _strip_topic_suffix(self, path: str) -> str:
         directory, filename = os.path.split(path)
         if not filename:
@@ -607,6 +667,31 @@ class MainWindow(QMainWindow):
         base_name = re.sub(r"_(\d{3})$", "", name)
         new_filename = f"{base_name}{ext}"
         return os.path.join(directory, new_filename) if directory else new_filename
+    def _normalize_path(self, path: Optional[str]) -> str:
+        return path.replace("\\", "/") if path else ""
+    def _resolve_original_path(self) -> Optional[str]:
+        candidates = []
+        if self.original_path:
+            candidates.append(self.original_path)
+        out_path = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
+        candidates.append(original_video_path_of(out_path))
+        base_out = self._strip_topic_suffix(out_path)
+        if base_out != out_path:
+            candidates.append(original_video_path_of(base_out))
+        seen = set()
+        for path in candidates:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            if os.path.exists(path):
+                self.original_path = path
+                return path
+        return None
+    def _require_original_path(self) -> Optional[str]:
+        path = self._resolve_original_path()
+        if not path:
+            self.log("원본 영상이 없습니다. 먼저 [원본 확인/다운로드]를 실행하세요.")
+        return path
 
     def on_apply_vtt_topic_results(self):
         raw = (QGuiApplication.clipboard().text() or "").strip()
@@ -763,7 +848,22 @@ class MainWindow(QMainWindow):
     def browse_file(self, target_edit: QLineEdit, filter_str="모든 파일 (*.*)"):
         start_dir = os.path.dirname(self.output_edit.text().strip() or OUTPUT_DEFAULT) or os.getcwd()
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", start_dir, filter_str)
-        if path: target_edit.setText(path)
+        if path:
+            target_edit.setText(path)
+            return path
+        return None
+
+    def on_intro_browse(self):
+        path = self.browse_file(self.intro_edit, "동영상 (*.mp4 *.mov *.mkv)")
+        if path:
+            self._media_paths["intro"] = path
+            self._save_media_paths()
+
+    def on_outro_browse(self):
+        path = self.browse_file(self.outro_edit, "동영상 (*.mp4 *.mov *.mkv)")
+        if path:
+            self._media_paths["outro"] = path
+            self._save_media_paths()
 
     def on_vtt_browse(self):
         start_dir = os.path.dirname(self.output_edit.text().strip() or OUTPUT_DEFAULT) or os.getcwd()
@@ -774,28 +874,30 @@ class MainWindow(QMainWindow):
 
     def on_output_save(self):
         path, _ = QFileDialog.getSaveFileName(self, "출력 파일 저장", self.output_edit.text() or OUTPUT_DEFAULT, "MP4 (*.mp4)")
-        if path: self.output_edit.setText(path)
+        if path:
+            self.output_edit.setText(self._normalize_path(path))
 
     # ---------- 다운로드 ----------
     def on_download(self):
         url = self.url_edit.text().strip()
         if url:
             self._save_last_url(url)
-        out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
-        self.original_path = original_video_path_of(out_path)
-        if os.path.exists(self.original_path):
-            specs = self.controller.get_video_specs(self.original_path)
-            self.media_duration = self.controller.get_media_duration(self.original_path)
+        existing = self._resolve_original_path()
+        if existing:
+            specs = self.controller.get_video_specs(existing)
+            self.media_duration = self.controller.get_media_duration(existing)
             status = "존재"
             if specs:
                 status += f" / {specs['width']}x{specs['height']} / {specs['r_frame_rate']}fps"
             if self.media_duration:
                 status += f" / {self.media_duration:.1f}s"
             self.status_label.setText(status)
-            self.log(f"원본 영상 확인 완료: {self.original_path}")
+            self.log(f"원본 영상 확인 완료: {existing}")
             return
+        out_path = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
+        self.original_path = original_video_path_of(out_path)
         self.status_label.setText("다운로드 중...")
-        tok = self.progress_acquire("다운로드 중...")
+        tok = self.progress_acquire("다운로드 준비중...")
         def hook(d):
             if d.get('status') == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
@@ -809,7 +911,8 @@ class MainWindow(QMainWindow):
             if ok:
                 self.media_duration = self.controller.get_media_duration(self.original_path)
                 txt = "다운로드 완료"
-                if self.media_duration: txt += f" / 길이: {self.media_duration:.1f}s"
+                if self.media_duration:
+                    txt += f" / 길이: {self.media_duration:.1f}s"
                 self.ui(self.status_label.setText, txt)
                 if vtt_found and not self.vtt_edit.text().strip():
                     self.ui(self.vtt_edit.setText, vtt_found)
@@ -820,6 +923,7 @@ class MainWindow(QMainWindow):
                 self.ui(self.log, "원본 다운로드 실패")
             self.ui(self.progress_release, tok)
         threading.Thread(target=worker, daemon=True).start()
+
 
     # ---------- VTT ----------
     def on_vtt_download(self):
@@ -1092,6 +1196,16 @@ class MainWindow(QMainWindow):
             finally:
                 self.ui(self.progress_release, tok)
         threading.Thread(target=worker, daemon=True).start()
+
+    def on_load_boundaries(self):
+        data = self._load_boundary_cache_data()
+        if not data:
+            self.log("저장된 경계 정보가 없습니다.")
+            return
+        spans, bounds = data
+        self.silence_spans = spans
+        self.sentence_bounds = bounds
+        self.log(f"경계 불러오기 완료: 무음 {len(spans)} / 문장 경계 {len(bounds)}")
 
     # ---------- 프롬프트 & 클립보드 ----------
     def copy_topic_prompt(self):
