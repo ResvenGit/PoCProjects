@@ -8,7 +8,7 @@ import os
 import re
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
@@ -730,6 +730,12 @@ class MainWindow(QMainWindow):
         text = text.strip()
         if not text:
             return []
+        entries = self._parse_vtt_sections_with_markers(text)
+        if entries:
+            return entries
+        return self._parse_vtt_sections_plain(text)
+
+    def _parse_vtt_sections_with_markers(self, text: str) -> List[dict]:
         pattern = re.compile(r"(주제\s*\d+\s*:.*?)(?=주제\s*\d+\s*:|$)", re.DOTALL)
         entries: List[dict] = []
         for match in pattern.finditer(text):
@@ -749,6 +755,45 @@ class MainWindow(QMainWindow):
             detail["summary"] = summary
             detail["segments"] = segments
             entries.append(detail)
+        return entries
+
+    def _parse_vtt_sections_plain(self, text: str) -> List[dict]:
+        entries: List[dict] = []
+        idx = 0
+        length = len(text)
+        while idx < length:
+            idx = self._skip_whitespace_and_fence(text, idx)
+            if idx >= length:
+                break
+            newline = text.find("\n", idx)
+            if newline == -1:
+                newline = length
+            title = text[idx:newline].strip()
+            idx = newline + 1 if newline < length else length
+            if not title:
+                continue
+            remainder = text[idx:]
+            json_match = re.search(r"^\s*JSON\b.*$", remainder, re.IGNORECASE | re.MULTILINE)
+            if not json_match:
+                summary_text = remainder.strip()
+                if summary_text:
+                    detail = self._new_topic_detail(title)
+                    detail["summary"] = self._extract_summary(summary_text)
+                    entries.append(detail)
+                break
+            desc_block = remainder[:json_match.start()].strip()
+            idx += json_match.end()
+            idx = self._skip_whitespace_and_fence(text, idx)
+            array_text, _, rel_end = self._extract_json_array_text(text[idx:], return_span=True)
+            detail = self._new_topic_detail(title)
+            detail["summary"] = self._extract_summary(desc_block)
+            if not array_text:
+                detail["segments"] = []
+                entries.append(detail)
+                break
+            detail["segments"] = self._parse_json_segments(array_text)
+            entries.append(detail)
+            idx += rel_end
         return entries
 
     def _parse_vtt_body(self, body: str):
@@ -817,10 +862,12 @@ class MainWindow(QMainWindow):
                 segments.append((s, e))
         return segments
 
-    def _extract_json_array_text(self, text: str) -> Optional[str]:
+    def _extract_json_array_text(
+        self, text: str, return_span: bool = False
+    ) -> Union[Optional[str], Tuple[Optional[str], int, int]]:
         start = text.find("[")
         if start == -1:
-            return None
+            return (None, -1, -1) if return_span else None
         depth = 0
         for idx in range(start, len(text)):
             ch = text[idx]
@@ -829,8 +876,27 @@ class MainWindow(QMainWindow):
             elif ch == "]":
                 depth -= 1
                 if depth == 0:
-                    return text[start:idx+1]
-        return None
+                    array_text = text[start:idx+1]
+                    if return_span:
+                        return array_text, start, idx + 1
+                    return array_text
+        return (None, -1, -1) if return_span else None
+
+    def _skip_whitespace_and_fence(self, text: str, idx: int) -> int:
+        length = len(text)
+        while idx < length:
+            while idx < length and text[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+            if text.startswith("```", idx):
+                newline = text.find("\n", idx)
+                if newline == -1:
+                    return length
+                idx = newline + 1
+                continue
+            break
+        return idx
 
     # ---------- 초기 세그먼트 ----------
     def _load_default_segments(self):
@@ -1174,10 +1240,11 @@ class MainWindow(QMainWindow):
 
     # ---------- 렌더 ----------
     def on_render(self):
-        out_path = self.output_edit.text().strip() or OUTPUT_DEFAULT
-        self.original_path = original_video_path_of(out_path)
-        if not (self.original_path and os.path.exists(self.original_path)):
+        out_path = self._normalize_path(self.output_edit.text().strip() or OUTPUT_DEFAULT)
+        source = self._resolve_original_path()
+        if not source:
             self.log("원본 영상이 없습니다. 먼저 다운로드 하세요."); return
+        self.original_path = source
         specs = self.controller.get_video_specs(self.original_path)
         if not specs: self.log("원본 스펙 확인 실패"); return
         if self.media_duration is None: self.media_duration = self.controller.get_media_duration(self.original_path)
