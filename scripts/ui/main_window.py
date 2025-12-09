@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self.topic_results: List[str] = []
         self.topic_details: List[dict] = []
         self._topic_list_updating = False
+        self._topic_summary_updating = False
         self._last_url_file = LAST_URL_FILE
         self._initial_url = self._load_saved_url() or DEFAULT_URL
         self._media_paths = self._load_media_paths()
@@ -185,7 +186,6 @@ class MainWindow(QMainWindow):
 
         self.lbl_topic_summary = QLabel("관련 설명")
         self.topic_summary_view = QTextEdit()
-        self.topic_summary_view.setReadOnly(True)
 
         self.start_edit = QLineEdit("")
         self.end_edit = QLineEdit("")
@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         self.btn_apply_vtt_topics.clicked.connect(self.on_apply_vtt_topic_results)
         self.list_topics.itemChanged.connect(self.on_topic_item_changed)
         self.list_topics.itemSelectionChanged.connect(self.on_topic_selection_changed)
+        self.topic_summary_view.textChanged.connect(self.on_topic_summary_changed)
 
     # ---------- URL Persistence ----------
     def _load_saved_url(self) -> Optional[str]:
@@ -632,10 +633,10 @@ class MainWindow(QMainWindow):
     def _display_topic_detail(self, idx: Optional[int]):
         self._apply_output_suffix(idx)
         if idx is None or not (0 <= idx < len(self.topic_details)):
-            self.topic_summary_view.clear()
+            self._set_topic_summary_text("")
             return
         detail = self.topic_details[idx]
-        self.topic_summary_view.setPlainText(detail.get("summary", ""))
+        self._set_topic_summary_text(detail.get("summary", ""))
         segments = detail.get("segments") or []
         if segments:
             self.segments = [(float(s), float(e)) for s, e in segments]
@@ -688,6 +689,21 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.topic_results):
             return self.topic_results[idx].strip()
         return ""
+
+    def _set_topic_summary_text(self, text: str):
+        self._topic_summary_updating = True
+        try:
+            self.topic_summary_view.setPlainText(text)
+        finally:
+            self._topic_summary_updating = False
+
+    def on_topic_summary_changed(self):
+        if self._topic_summary_updating:
+            return
+        idx = self.current_topic_index()
+        if not (0 <= idx < len(self.topic_details)):
+            return
+        self.topic_details[idx]["summary"] = self.topic_summary_view.toPlainText()
     def _resolve_original_path(self) -> Optional[str]:
         candidates = []
         if self.original_path:
@@ -815,21 +831,17 @@ class MainWindow(QMainWindow):
             return ""
         lines = text_block.splitlines()
         filtered_lines = []
-        length_line = ""
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 filtered_lines.append("")
                 continue
             if stripped.startswith("총길이"):
-                length_line = stripped
-            else:
-                filtered_lines.append(stripped)
+                continue
+            filtered_lines.append(stripped)
         normalized = "\n".join(filtered_lines).strip()
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", normalized) if p.strip()]
         summary = normalized if not paragraphs else "\n\n".join(paragraphs)
-        if length_line:
-            summary = (summary + ("\n\n" if summary else "") + length_line).strip()
         return summary
 
     def _parse_json_segments(self, payload: str) -> List[Tuple[float, float]]:
